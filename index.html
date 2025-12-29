@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>撮影位置表示（画像＋動画）</title>
+  <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mediainfo.js/dist/mediainfo.min.js"></script>
+  <style>
+    .media-block { margin-bottom: 20px; }
+    .thumbnail { max-width: 150px; cursor: pointer; border: 1px solid #ccc; margin-top: 5px; }
+    .direction { display: inline-flex; align-items: center; margin-left: 10px; position: relative; width: 60px; height: 60px; }
+    .compass { width: 60px; height: 60px; border: 2px solid #333; border-radius: 50%; position: absolute; top: 0; left: 0; background: radial-gradient(circle, #fff 70%, #eee 100%); }
+    .compass::before { content: "N"; position: absolute; top: 2px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; }
+    .compass::after { content: "S"; position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: bold; }
+    .arrow { position: absolute; top: 50%; left: 50%; width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 20px solid red; transform-origin: center bottom; }
+  </style>
+</head>
+<body>
+  <h2>写真・動画を選択してください（複数可）</h2>
+  <input type="file" id="mediaInput" accept="image/*,video/*" multiple>
+  <div id="resultList"></div>
+
+  <script>
+    document.getElementById("mediaInput").addEventListener("change", async function(event) {
+      const files = event.target.files;
+      const resultList = document.getElementById("resultList");
+      resultList.innerHTML = "";
+
+      for (const file of files) {
+        const url = URL.createObjectURL(file);
+        let info = `<strong>${file.name}</strong>`;
+        const fileSizeKB = (file.size / 1024).toFixed(1);
+        info += ` ／ ファイルサイズ: ${fileSizeKB} KB`;
+
+        const block = document.createElement("div");
+        block.className = "media-block";
+
+        if (file.type.startsWith("image/")) {
+          const img = new Image();
+          img.onload = function() {
+            EXIF.getData(img, function() {
+              const lat = EXIF.getTag(this, "GPSLatitude");
+              const latRef = EXIF.getTag(this, "GPSLatitudeRef");
+              const lon = EXIF.getTag(this, "GPSLongitude");
+              const lonRef = EXIF.getTag(this, "GPSLongitudeRef");
+              const direction = EXIF.getTag(this, "GPSImgDirection");
+              const dateTime = EXIF.getTag(this, "DateTimeOriginal");
+
+              function toDecimal(coord) { return coord[0] + coord[1]/60 + coord[2]/3600; }
+
+              if (lat && lon && latRef && lonRef) {
+                let latDec = toDecimal(lat), lonDec = toDecimal(lon);
+                if (latRef === "S") latDec = -latDec;
+                if (lonRef === "W") lonDec = -lonDec;
+                const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${latDec},${lonDec}`;
+                info += ` → <a href="${mapsUrl}" target="_blank">Google Mapsで表示</a>`;
+              } else { info += " → GPS情報なし"; }
+
+              if (direction) {
+                info += ` ／ 撮影方向: ${direction}°`;
+                info += `<span class="direction"><div class="compass"></div><div class="arrow" style="transform: rotate(${direction}deg);"></div></span>`;
+              }
+              if (dateTime) info += ` ／ 撮影日時: ${dateTime}`;
+              info += ` ／ 画像サイズ: ${img.width}×${img.height}px`;
+
+              block.innerHTML = info + `<br><img src="${url}" alt="${file.name}" class="thumbnail">`;
+              resultList.appendChild(block);
+
+              block.querySelector(".thumbnail").onclick = () => {
+                const newWin = window.open();
+                newWin.document.write(`<title>${file.name}</title><img src="${url}" style="max-width:100%;height:auto;">`);
+              };
+            });
+          };
+          img.src = url;
+        } else if (file.type.startsWith("video/")) {
+          let lat, lon, direction, dateTime;
+          let gpsStatus = "";
+
+          try {
+            const mediainfo = await MediaInfo({ format: 'object' });
+            const result = await mediainfo.analyzeData(
+              () => file.size,
+              chunkSize => file.slice(0, chunkSize)
+            );
+
+            if (result.media && result.media.track) {
+              result.media.track.forEach(track => {
+                if (track.GPSLatitude && track.GPSLongitude) {
+                  lat = track.GPSLatitude;
+                  lon = track.GPSLongitude;
+                }
+                if (track.GPSImgDirection) direction = track.GPSImgDirection;
+                if (track.Recorded_Date) dateTime = track.Recorded_Date;
+              });
+            }
+
+            if (lat && lon) {
+              const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+              gpsStatus += ` → <a href="${mapsUrl}" target="_blank">Google Mapsで表示</a>`;
+            } else {
+              gpsStatus += " → GPS情報なし";
+            }
+
+            if (direction) {
+              gpsStatus += ` ／ 撮影方向: ${direction}°`;
+              gpsStatus += `<span class="direction"><div class="compass"></div><div class="arrow" style="transform: rotate(${direction}deg);"></div></span>`;
+            }
+          } catch (err) {
+            gpsStatus = " → GPS解析失敗";
+          }
+
+          // 撮影日時（Recorded_Dateが無ければlastModifiedを利用）
+          if (!dateTime && file.lastModified) {
+            dateTime = new Date(file.lastModified).toLocaleString();
+          }
+          if (dateTime) info += ` ／ 撮影日時: ${dateTime}`;
+
+          const video = document.createElement("video");
+          video.src = url;
+          video.muted = true;
+          video.playsInline = true;
+
+          video.addEventListener("loadedmetadata", () => {
+            const frameWidth = video.videoWidth;
+            const frameHeight = video.videoHeight;
+            info += ` ／ 画像サイズ: ${frameWidth}×${frameHeight}px`;
+            video.currentTime = 0;
+          });
+
+          video.addEventListener("seeked", () => {
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const thumbUrl = canvas.toDataURL("image/png");
+
+            block.innerHTML = info + gpsStatus + `<br><img src="${thumbUrl}" alt="${file.name}" class="thumbnail">`;
+            resultList.appendChild(block);
+
+            block.querySelector(".thumbnail").onclick = () => {
+              const newWin = window.open();
+              newWin.document.write(`<title>${file.name}</title><img src="${thumbUrl}" style="max-width:100%;height:auto;">`);
+            };
+          });
+        }
+      }
+    });
+  </script>
+</body>
+</html>
